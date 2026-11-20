@@ -682,6 +682,11 @@ def public_demo(command: DemoCommand):
         connection.close()
 
 
+@app.get("/api/public-demo")
+def open_public_demo():
+    return public_demo(DemoCommand(method="GET", path="/workspace"))
+
+
 @app.api_route("/", methods=["GET", "HEAD"], include_in_schema=False)
 @app.api_route("/index.html", methods=["GET", "HEAD"], include_in_schema=False)
 def frontend():

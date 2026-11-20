@@ -600,6 +600,10 @@ function App() {
     signal?.throwIfAborted()
     setWs(data)
   }
+  async function retryDemo() {
+    setError('')
+    try { await refresh() } catch (cause) { setError(cause.message) }
+  }
   function go(to, replace = false) {
     if (currentRoute() !== to) {
       const hash = to === 'dashboard' ? '' : `#${to}`
@@ -679,7 +683,7 @@ function App() {
 
   if (user === undefined) return <main className="loading">Opening AutoTest…</main>
   if (!user) return <LoginScreen hosted={hosted} startupError={error} onLogin={result => { setError(''); setUser(result) }}/>
-  if (!ws) return <main className="loading"><Notice error>{error}</Notice>{!error && 'Loading the workspace…'}{error && (publicDemo ? <Button secondary onClick={() => location.reload()}>Reload demo</Button> : <Button secondary onClick={logout}>Return to sign in</Button>)}</main>
+  if (!ws) return <main className="loading"><Notice error>{error}</Notice>{!error && 'Loading the workspace…'}{error && (publicDemo ? <Button secondary onClick={retryDemo}>Retry demo</Button> : <Button secondary onClick={logout}>Return to sign in</Button>)}</main>
 
   function content() {
     switch (page) {
