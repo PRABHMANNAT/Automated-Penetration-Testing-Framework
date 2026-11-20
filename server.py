@@ -16,7 +16,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from fastapi import Cookie, FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ValidationError
 from reportlab.lib import colors
@@ -690,7 +690,9 @@ def frontend():
     index = ROOT / "dist" / "index.html"
     if not index.is_file():
         raise HTTPException(503, "Build the React frontend before opening the workspace.")
-    return FileResponse(index, media_type="text/html", headers={"Cache-Control": "no-store"})
+    content = index.read_bytes()
+    fingerprint = hashlib.sha256(content).hexdigest()
+    return Response(content, media_type="text/html", headers={"Cache-Control": "no-store", "ETag": f'"{fingerprint}"'})
 
 
 app.mount("/", StaticFiles(directory=ROOT / "dist", check_dir=False), name="frontend-assets")
