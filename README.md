@@ -20,18 +20,20 @@ The downloadable archive includes the built interface. For that archive, start w
 ## Deploy to Vercel
 
 1. Import the GitHub repository into Vercel. Use the repository root and the **FastAPI** preset. The checked-in configuration builds the React interface and packages it with the FastAPI application. [FastAPI on Vercel](https://vercel.com/docs/frameworks/backend/fastapi)
-2. Set these environment variables for the Preview or Production environment you plan to deploy.
+2. Deploy and open the URL. The default hosted demo opens on **Overview**, ready for **Auto-run demo**. It requires no account, password, or PostgreSQL instance.
 
-   | Variable | Value |
-   | --- | --- |
-   | `AUTOTEST_DATABASE_URL` | A PostgreSQL connection string for a dedicated demo database. Use the provider’s TLS connection string and a role that can create tables and triggers in the database schema. |
-   | `AUTOTEST_DEMO_PASSWORD` | A unique demo password of 16–128 characters. |
-   | `AUTOTEST_HOSTED` | Set to `1` if Vercel system environment variables are disabled. |
+Each browser tab keeps its own signed fixture workspace for the session, including replay history and audit entries. Reloading keeps the workspace. A new deployment starts a fresh workspace.
 
-   Save the database URL and password as secrets. [Vercel environment variables](https://vercel.com/docs/environment-variables)
-3. Deploy, then sign in as `demo@autotest.test` with the configured password and select **Auto-run demo**.
+### Optional password-protected deployment
 
-The hosted app stores replay history and sessions in PostgreSQL. Its shared demo account is password-protected. Local analyst registration and password recovery are available on localhost.
+Set both of the following variables for a deployment that needs shared PostgreSQL history and a sign-in page.
+
+| Variable | Value |
+| --- | --- |
+| `AUTOTEST_DATABASE_URL` | A TLS PostgreSQL connection string for a dedicated demo database. Use a role that can create tables and triggers in the database schema. |
+| `AUTOTEST_DEMO_PASSWORD` | A unique demo password of 16–128 characters. |
+
+Save the values as secrets and sign in as `demo@autotest.test` after deployment. Set `AUTOTEST_HOSTED=1` if Vercel system environment variables are disabled. [Vercel environment variables](https://vercel.com/docs/environment-variables)
 
 ## Demonstration
 

@@ -25,6 +25,7 @@
 .mast-inner .account-menu summary { color: #b8c5bd; }
 .mast-inner .avatar { background: #2b3b34; color: #e0f0e3; }
 .mast-inner .account-popup { color: var(--ink); }
+.public-demo-label { padding: 4px 8px; border: 1px solid #465c4d; border-radius: 5px; color: #d3e5d7; font-size: .79rem; font-weight: 650; }
 
 .workbench-shell .main-content { width: min(100%, 1320px); max-width: none; padding: 29px 34px 46px; gap: 22px; }
 .has-guide .main-content { padding-bottom: 172px; }

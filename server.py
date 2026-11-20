@@ -1,3 +1,4 @@
+import base64
 import hashlib
 import hmac
 import json
@@ -7,6 +8,7 @@ import secrets
 import sqlite3
 import time
 from contextlib import asynccontextmanager, contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from html import escape
 from io import BytesIO
@@ -16,12 +18,13 @@ from urllib.parse import urlsplit
 from fastapi import Cookie, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 from reportlab.lib import colors
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib.units import inch
 from reportlab.platypus import KeepTogether, Paragraph, SimpleDocTemplate, Spacer
 
+from demo_snapshot import ExpiredSnapshot, MAX_TOKEN_LENGTH, WorkspaceFull, restore, snapshot
 from fixtures import BENCHMARKS, CATEGORIES, STAGES, TARGETS, TOOLS, evidence_for, in_path
 
 
@@ -34,39 +37,52 @@ HOSTED = os.environ.get("AUTOTEST_HOSTED") == "1" or (
 DEMO_EMAIL = "demo@autotest.test"
 DEMO_PASSWORD = os.environ.get("AUTOTEST_DEMO_PASSWORD", "")
 CONFIGURED = not HOSTED or bool(DSN and 16 <= len(DEMO_PASSWORD) <= 128)
+DEMO_USER = {"email": DEMO_EMAIL, "name": "Demo Administrator", "role": "Admin"}
 PROFILES = ("Full fixture", "Headers only", "Recorded scanner error")
 DETECTORS = list(TOOLS)[1:]
 COOKIE = "autotest_session"
+LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1", "testserver"}
 
 
 class Database:
-    def __init__(self, connection):
+    def __init__(self, connection, postgres=False):
         self.connection = connection
+        self.postgres = postgres
 
     def execute(self, sql, args=()):
-        return self.connection.execute(sql.replace("?", "%s") if DSN else sql, args)
+        return self.connection.execute(sql.replace("?", "%s") if self.postgres else sql, args)
 
 
-@contextmanager
-def transaction():
+demo_database: ContextVar[Database | None] = ContextVar("demo_database", default=None)
+
+
+def open_database():
     if DSN:
         import psycopg
         from psycopg.rows import dict_row
         connection = psycopg.connect(DSN, row_factory=dict_row, connect_timeout=8)
-    else:
-        DB.parent.mkdir(parents=True, exist_ok=True)
-        connection = sqlite3.connect(DB, timeout=15)
-        connection.row_factory = sqlite3.Row
-    db = Database(connection)
+        return Database(connection, postgres=True)
+    DB.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(DB, timeout=15)
+    connection.row_factory = sqlite3.Row
+    return Database(connection)
+
+
+@contextmanager
+def transaction():
+    guest = demo_database.get()
+    db = guest or open_database()
+    connection = db.connection
     try:
-        db.execute("SELECT pg_advisory_xact_lock(87652026)" if DSN else "BEGIN IMMEDIATE")
+        db.execute("SELECT pg_advisory_xact_lock(87652026)" if db.postgres else "BEGIN IMMEDIATE")
         yield db
         connection.commit()
     except BaseException:
         connection.rollback()
         raise
     finally:
-        connection.close()
+        if guest is None:
+            connection.close()
 
 
 def now():
@@ -158,7 +174,7 @@ def initialize():
         db.execute("CREATE TABLE IF NOT EXISTS sessions (token TEXT PRIMARY KEY, email TEXT NOT NULL, expires DOUBLE PRECISION NOT NULL)")
         db.execute("CREATE TABLE IF NOT EXISTS records (kind TEXT NOT NULL,id TEXT NOT NULL,body TEXT NOT NULL,PRIMARY KEY (kind,id))")
         db.execute("CREATE TABLE IF NOT EXISTS audit (seq INTEGER PRIMARY KEY,body TEXT NOT NULL,hash TEXT NOT NULL)")
-        if DSN:
+        if db.postgres:
             db.execute("""CREATE OR REPLACE FUNCTION autotest_keep_audit() RETURNS trigger LANGUAGE plpgsql AS $$
                           BEGIN RAISE EXCEPTION 'Audit is append-only'; END; $$""")
             db.execute("DROP TRIGGER IF EXISTS audit_no_mutation ON audit")
@@ -171,7 +187,7 @@ def initialize():
                           BEGIN SELECT RAISE(ABORT, 'Audit is append-only'); END""")
         if db.execute("SELECT email FROM users WHERE email=?", (DEMO_EMAIL,)).fetchone():
             return
-        db.execute("INSERT INTO users VALUES (?,?,?,NULL,NULL)", (DEMO_EMAIL, "Demo Administrator", "Admin"))
+        db.execute("INSERT INTO users VALUES (?,?,?,NULL,NULL)", (DEMO_EMAIL, DEMO_USER["name"], DEMO_USER["role"]))
         for index, asset in enumerate(TARGETS, 1):
             started = now() - index * 86400
             auth = saved_authorization(asset, started - 3600)
@@ -199,14 +215,15 @@ app = FastAPI(title="AutoTest Research Workbench", lifespan=lifespan, docs_url=N
 
 @app.middleware("http")
 async def check_origin(request: Request, call_next):
-    if not HOSTED and request.url.hostname not in {"127.0.0.1", "localhost", "::1", "testserver"}:
+    local = request.url.hostname in LOCAL_HOSTS
+    if not HOSTED and not local:
         return Response("Open the workbench on localhost.", 403)
     origin = request.headers.get("origin")
-    scheme = "https" if HOSTED else request.url.scheme
+    scheme = "https" if HOSTED and not local else request.url.scheme
     if request.method not in {"GET", "HEAD"} and origin and origin != f"{scheme}://{request.url.netloc}":
         return Response("Unrecognized request origin.", 403)
-    if not CONFIGURED and request.url.path.startswith("/api/") and request.url.path != "/api/session":
-        response = JSONResponse({"detail": "The hosted workspace is missing its database or demo password."}, 503)
+    if not CONFIGURED and request.url.path.startswith("/api/") and request.url.path not in {"/api/session", "/api/public-demo"}:
+        response = JSONResponse({"detail": "This deployment uses a browser demo workspace."}, 404)
     else:
         response = await call_next(request)
     response.headers["X-Content-Type-Options"] = "nosniff"
@@ -218,6 +235,8 @@ async def check_origin(request: Request, call_next):
 
 
 def account(db, token, required=True):
+    if demo_database.get() is db:
+        return DEMO_USER.copy()
     user = db.execute("SELECT u.email,u.name,u.role FROM users u JOIN sessions s ON u.email=s.email WHERE s.token=? AND s.expires>?",
                       (digest(token or ""), now())).fetchone()
     if HOSTED and user and user["email"] != DEMO_EMAIL:
@@ -253,7 +272,7 @@ class Reset(Login):
 @app.get("/api/session")
 def session(autotest_session: str | None = Cookie(None)):
     if not CONFIGURED:
-        return {"user": None, "hosted": True, "configured": False}
+        return {"user": DEMO_USER, "hosted": True, "public_demo": True}
     with transaction() as db:
         return {"user": account(db, autotest_session, False), "hosted": HOSTED, "configured": True}
 
@@ -496,7 +515,7 @@ def workspace(autotest_session: str | None = Cookie(None)):
     with transaction() as db:
         user = account(db, autotest_session)
         return {"user": user, "hosted": HOSTED, "targets": TARGETS, "tools": TOOLS, "profiles": PROFILES,
-                "database": "PostgreSQL" if DSN else "SQLite",
+                "database": "Browser demo workspace" if demo_database.get() is db else ("PostgreSQL" if db.postgres else "SQLite"),
                 "authorizations": records(db, "authorization"), "validations": records(db, "validation"),
                 "runs": [run_view(db, job, False) for job in records(db, "run")],
                 "audit": audit_view(db), "benchmarks": BENCHMARKS, "categories": CATEGORIES}
@@ -593,6 +612,74 @@ def export_report(key: str, format: str, autotest_session: str | None = Cookie(N
             content, media = buffer.getvalue(), "application/pdf"
         audit(db, user["email"], "Report exported", format.upper(), run["authorization"], key)
         return Response(content, media_type=media, headers={"Content-Disposition": f'attachment; filename="AutoTest-{key}.{format}"'})
+
+
+class DemoCommand(BaseModel):
+    method: str = Field(max_length=5)
+    path: str = Field(max_length=150)
+    state: str = Field(default="", max_length=MAX_TOKEN_LENGTH)
+    data: dict | None = None
+
+
+DEMO_ROUTES = (
+    ("GET", re.compile("/workspace"), workspace, None),
+    ("POST", re.compile("/authorizations"), register_authorization, Authorization),
+    ("PATCH", re.compile(r"/authorizations/([A-Z0-9-]{1,40})"), decide_authorization, Decision),
+    ("POST", re.compile("/scope"), scope, Scope),
+    ("POST", re.compile("/runs"), start_run, RunRequest),
+    ("GET", re.compile(r"/runs/([A-Z0-9-]{1,40})"), get_run, None),
+    ("PATCH", re.compile(r"/runs/([A-Z0-9-]{1,40})/findings/([a-z0-9-]{1,40})"), review_finding, Review),
+    ("GET", re.compile(r"/runs/([A-Z0-9-]{1,40})/export/(pdf|html)"), export_report, None),
+)
+
+
+def demo_operation(command, route):
+    _, pattern, endpoint, model = route
+    args = list(pattern.fullmatch(command.path).groups())
+    if model:
+        args.append(model.model_validate(command.data or {}))
+    return endpoint(*args, autotest_session=None)
+
+
+@app.post("/api/public-demo")
+def public_demo(command: DemoCommand):
+    if CONFIGURED:
+        raise HTTPException(404, "Browser demo is unavailable in this workspace.")
+    route = next((item for item in DEMO_ROUTES if command.method == item[0] and item[1].fullmatch(command.path)), None)
+    if not route:
+        raise HTTPException(404, "Unknown demo operation.")
+
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row
+    context = demo_database.set(Database(connection))
+    try:
+        if command.state:
+            restore(connection, command.state)
+        else:
+            initialize()
+        try:
+            result = demo_operation(command, route)
+        except ValidationError:
+            raise HTTPException(422, "Check the required fields and try again.") from None
+        envelope = {}
+        status = 200
+        if isinstance(result, JSONResponse):
+            status = result.status_code
+            envelope.update(json.loads(result.body))
+        elif isinstance(result, Response):
+            envelope["file"] = {"body": base64.b64encode(result.body).decode("ascii"), "type": result.media_type}
+        else:
+            envelope["result"] = result
+        if not command.state or connection.total_changes:
+            envelope["state"] = snapshot(connection)
+        return JSONResponse(envelope, status_code=status)
+    except ExpiredSnapshot:
+        return JSONResponse({"code": "expired_demo", "detail": "The browser demo has a new version."}, status_code=409)
+    except WorkspaceFull:
+        raise HTTPException(413, "This demo tab has reached its storage limit. Open the demo in a new tab to continue.") from None
+    finally:
+        demo_database.reset(context)
+        connection.close()
 
 
 app.mount("/", StaticFiles(directory=ROOT / "dist", html=True, check_dir=False), name="frontend")

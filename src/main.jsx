@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react'
 import { createRoot } from 'react-dom/client'
+import { publicDemoTransport } from './demo-transport.js'
 import { GuideDock, GuidedCursor, useGuidedDemo } from './guide.jsx'
 import './style.css'
 import './workbench.css'
@@ -62,11 +63,15 @@ const fixed = (value, digits = 3) => value == null ? '—' : value.toFixed(digit
 const pathFor = (target, path) => `https://${target.host}${path}`
 const initials = name => name.split(/\s+/).slice(0, 2).map(part => part[0]).join('').toUpperCase()
 
+let demoRequest = null
+
 async function api(path, method = 'GET', data, signal) {
+  if (demoRequest && path !== '/session') return demoRequest(path, method, data, signal)
   const response = await fetch(`/api${path}`, {
     method, signal, credentials: 'same-origin',
     ...(data ? { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) } : {}),
   })
+  if (response.ok && path.includes('/export/')) return response.blob()
   const body = await response.json()
   if (!response.ok) throw new Error(typeof body.detail === 'string' ? body.detail : 'Check the required fields and try again.')
   return body
@@ -98,7 +103,7 @@ function DataTable({ headers, rows, empty = 'There are no records to display.' }
     <tbody>{rows.map(({ key, cells }) => <tr key={key}>{cells.map((cell, index) => <td key={index}>{cell}</td>)}</tr>)}</tbody></table></div>
 }
 
-function LoginScreen({ onLogin, hosted, configured, startupError }) {
+function LoginScreen({ onLogin, hosted, startupError }) {
   const [mode, setMode] = useState('login')
   const [error, setError] = useState('')
   const [info, setInfo] = useState('')
@@ -129,7 +134,7 @@ function LoginScreen({ onLogin, hosted, configured, startupError }) {
     <section className="login-form">
       <h2>{mode === 'login' ? 'Sign in' : mode === 'register' ? 'Create an analyst account' : 'Reset your password'}</h2>
       <p>{hosted ? 'Enter the password configured for the hosted demo account.' : mode === 'login' ? 'Open the seeded workspace or use a local analyst account.' : mode === 'register' ? 'New accounts can request authorizations and review findings.' : 'Use the recovery code issued when you registered.'}</p>
-      <Notice error>{startupError || (!configured ? 'Set AUTOTEST_DATABASE_URL and AUTOTEST_DEMO_PASSWORD in Vercel to enable sign-in.' : '')}</Notice>
+      <Notice error>{startupError}</Notice>
       {!hosted && mode === 'login' && <Button icon="terminal" secondary disabled={busy || Boolean(startupError)} onClick={() => submit('demo')}>Open demo workspace</Button>}
       <form key={mode} className="stack" onSubmit={event => { event.preventDefault(); submit(mode, Object.fromEntries(new FormData(event.currentTarget))) }}>
         {mode === 'register' && <Field label="Full name"><input name="name" required minLength="2" maxLength="80" autoComplete="name"/></Field>}
@@ -137,7 +142,7 @@ function LoginScreen({ onLogin, hosted, configured, startupError }) {
         {mode === 'reset' && <Field label="Recovery code"><input name="recovery" minLength="8" maxLength="80" required/></Field>}
         <Field label={mode === 'reset' ? 'New password' : 'Password'}><input name="password" type="password" required minLength={mode === 'login' ? undefined : 8} maxLength="128" autoComplete={mode === 'login' ? 'current-password' : 'new-password'}/></Field>
         <Notice error>{error}</Notice><Notice>{info}</Notice>
-        <Button type="submit" disabled={busy || !configured || Boolean(startupError)}>{mode === 'login' ? 'Sign in' : mode === 'register' ? 'Create account' : 'Update password'}</Button>
+        <Button type="submit" disabled={busy || Boolean(startupError)}>{mode === 'login' ? 'Sign in' : mode === 'register' ? 'Create account' : 'Update password'}</Button>
       </form>
       {!hosted && <div className="login-links">{mode === 'login' ? <><button onClick={() => switchMode('register')}>Create account</button><button onClick={() => switchMode('reset')}>Forgot password?</button></> : <button onClick={() => switchMode('login')}>Back to sign in</button>}</div>}
     </section>
@@ -189,7 +194,7 @@ function Dashboard({ ws, go, open, play, playing }) {
   return <>
     <section className="overview-hero">
       <div className="hero-copy">
-        <span className="hero-context"><Icon name="lock" size={13}/> {ws.hosted ? 'Hosted evidence workspace' : 'Local evidence workspace'}</span>
+        <span className="hero-context"><Icon name="lock" size={13}/> {demoRequest ? 'Browser demo workspace' : ws.hosted ? 'Hosted evidence workspace' : 'Local evidence workspace'}</span>
         <h1>Security assessment</h1>
         <p>Follow the research pipeline from approved scope to ranked findings and an assessment report.</p>
         <div className="hero-actions">
@@ -493,9 +498,7 @@ function Reports({ run, refresh }) {
   async function download(format) {
     setError('')
     try {
-      const response = await fetch(`/api/runs/${run.id}/export/${format}`)
-      if (!response.ok) throw new Error('The report could not be downloaded. Check that the replay has finished.')
-      const url = URL.createObjectURL(await response.blob())
+      const url = URL.createObjectURL(await api(`/runs/${run.id}/export/${format}`))
       const anchor = Object.assign(document.createElement('a'), { href: url, download: `AutoTest-${run.id}.${format}` })
       anchor.click()
       setTimeout(() => URL.revokeObjectURL(url), 1000)
@@ -577,7 +580,7 @@ const currentRoute = () => labels[location.hash.slice(1)] ? location.hash.slice(
 function App() {
   const [user, setUser] = useState(undefined)
   const [hosted, setHosted] = useState(false)
-  const [configured, setConfigured] = useState(true)
+  const [publicDemo, setPublicDemo] = useState(false)
   const [ws, setWs] = useState(null)
   const [page, setPage] = useState(currentRoute)
   const [runId, setRunId] = useState(() => sessionStorage.getItem('autotest.run') || '')
@@ -634,7 +637,8 @@ function App() {
     window.addEventListener('popstate', navigate)
     api('/session').then(result => {
       setHosted(Boolean(result.hosted))
-      setConfigured(result.configured !== false)
+      setPublicDemo(Boolean(result.public_demo))
+      demoRequest = result.public_demo ? publicDemoTransport() : null
       setUser(result.user)
     }).catch(cause => { setError(cause.message); setUser(null) })
     return () => {
@@ -674,8 +678,8 @@ function App() {
   }, [hasRunning, playing, user])
 
   if (user === undefined) return <main className="loading">Opening AutoTest…</main>
-  if (!user) return <LoginScreen hosted={hosted} configured={configured} startupError={error} onLogin={result => { setError(''); setUser(result) }}/>
-  if (!ws) return <main className="loading"><Notice error>{error}</Notice>{!error && 'Loading the local workspace…'}{error && <Button secondary onClick={logout}>Return to sign in</Button>}</main>
+  if (!user) return <LoginScreen hosted={hosted} startupError={error} onLogin={result => { setError(''); setUser(result) }}/>
+  if (!ws) return <main className="loading"><Notice error>{error}</Notice>{!error && 'Loading the workspace…'}{error && (publicDemo ? <Button secondary onClick={() => location.reload()}>Reload demo</Button> : <Button secondary onClick={logout}>Return to sign in</Button>)}</main>
 
   function content() {
     switch (page) {
@@ -712,9 +716,9 @@ function App() {
           </button>)}</nav>
         <div className="top-account">
           {page !== 'dashboard' && <Button data-guide="demo-start" disabled={playing} icon="play" secondary onClick={play}>Auto-run demo</Button>}
-          <details className="account-menu"><summary aria-label="Account options"><span className="avatar">{initials(user.name)}</span><Icon name="down" size={13}/></summary>
+          {publicDemo ? <span className="public-demo-label">Demo</span> : <details className="account-menu"><summary aria-label="Account options"><span className="avatar">{initials(user.name)}</span><Icon name="down" size={13}/></summary>
             <div className="account-popup"><strong>{user.name}</strong><small>{user.email}</small><button className="text-link" onClick={logout}><Icon name="logout" size={16}/>Sign out</button></div>
-          </details>
+          </details>}
         </div>
       </div>
     </header>
