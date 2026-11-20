@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.venv/
+.vercel/
+.data/
+__pycache__/
+*.py[cod]
+*.sqlite*
+.env
+.env.*
+*.log
