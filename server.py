@@ -16,7 +16,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from fastapi import Cookie, FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ValidationError
 from reportlab.lib import colors
@@ -682,4 +682,15 @@ def public_demo(command: DemoCommand):
         connection.close()
 
 
-app.mount("/", StaticFiles(directory=ROOT / "dist", html=True, check_dir=False), name="frontend")
+@app.api_route("/", methods=["GET", "HEAD"], include_in_schema=False)
+@app.api_route("/index.html", methods=["GET", "HEAD"], include_in_schema=False)
+def frontend():
+    # Always deliver the entry document for the current deployment. Its hashed
+    # asset URLs change whenever the compiled interface changes.
+    index = ROOT / "dist" / "index.html"
+    if not index.is_file():
+        raise HTTPException(503, "Build the React frontend before opening the workspace.")
+    return FileResponse(index, media_type="text/html", headers={"Cache-Control": "no-store"})
+
+
+app.mount("/", StaticFiles(directory=ROOT / "dist", check_dir=False), name="frontend-assets")
